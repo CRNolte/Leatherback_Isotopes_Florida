@@ -1,4 +1,3 @@
-[Florida_Dc_SIA_manuscript_clean_Jan_2026_github.md](https://github.com/user-attachments/files/25156370/Florida_Dc_SIA_manuscript_clean_Jan_2026_github.md)
 A comparison of stable isotope values in epidermis and blood of nesting
 leatherback sea turtles in the Northwest Atlantic Ocean
 ================
