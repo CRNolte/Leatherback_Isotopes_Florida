@@ -1,0 +1,1418 @@
+---
+title: "A comparison of stable isotope values in epidermis and blood of nesting leatherback sea turtles in the Northwest Atlantic Ocean"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE)
+# Control how numbers are printed in the document
+options(digits = 4)
+```
+
+## Leatherback isotope analyses
+
+This is a RMarkdown document outlining the data processing and analyses of isotopes for carbon and nitrogen of nesting leatherback sea turtles nesting in Juno Beach, Florida. We used stable isotope analysis of epidermis, whole blood, and RBCs to investigate the habitat-use patterns of nesting leatherback sea turtles in Florida, USA. By analyzing stable carbon (𝛿¹³C) and nitrogen (𝛿¹⁵N) values, we aimed to examine the isotopic variability as a proxy for foraging area diversity. Furthermore, we assessed isotopic variability in both epidermis and blood across the nesting season to determine whether tissue isotope values remained stable or fluctuated because of potential physiological changes, fasting, or other metabolic processes. Finally, we examined the isotopic relationship between different tissue types to facilitate cross-study comparisons. Understanding these dynamics is important for the application of stable isotopes in ecological monitoring, particularly when using these data to infer long-term habitat use. .
+
+The various steps that will be performed are:
+
+1: Load data
+
+2: Examine differences between seasons and plot all samples for season and tissue type
+
+3: Perform cluster analyses for epidermis and whole blood separately
+
+4: Look at changes in isotopic values for the same individual within a nesting season
+
+5: Compare the isotopic relationship between whole blood and epidermis
+
+6: Comparison of C:N ratio and carbon 13
+
+## Load Required Libraries
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+library(gridExtra)
+library(cowplot)
+library(patchwork)
+library(ggpubr)
+library(ggpmisc)
+library(stringr)
+library(DT)
+library(vegan)
+library(cluster)
+library(mclust)
+library(kableExtra)
+library(viridis)
+library(RColorBrewer)
+library(glue)
+library(nlme)
+library(lmodel2)
+library(car)
+library(pairwiseAdonis)
+library(broom)
+library(grid)
+library(tidyverse)
+library(emmeans)
+library(multcomp)
+library(conflicted)
+conflicts_prefer(
+  dplyr::select,
+  dplyr::filter,
+  DT::datatable,
+  ggplot2::annotate,
+  cowplot::get_legend
+)
+```
+
+## 1: Import data for use and basic statistics on sample size
+This project includes datasets from two studies at the same beach and processed in the same isotope lab at the University of Florida.
+
+
+```{r}
+sia <- read.csv("Florida_Dc_Isotope_data_Cop_Nol_first_last.csv") %>%
+  select(-c(Sample))
+
+DT::datatable(
+  sia,
+  options = list(pageLength = 10, order = list(list(1, 'asc')))
+)
+
+```
+The columns are as follows:
+```{r}
+metadata_table <- tibble::tribble(
+  ~Variable, ~Description,
+  "Year", "Calendar year in which the sample was collected.",
+  "Date", "Date of sample collection (MM/DD/YYYY).",
+  "Julian_Day", "Julian day corresponding to the sampling date (1–365/366), used to quantify timing within the nesting season.",
+  "Turtle_ID", "Unique identifier assigned to each individual leatherback sea turtle.",
+  "d13C", "Stable carbon isotope ratio (δ¹³C, ‰) of the tissue sample relative to the Vienna Pee Dee Belemnite (VPDB) standard.",
+  "d15N", "Stable nitrogen isotope ratio (δ¹⁵N, ‰) of the tissue sample relative to atmospheric nitrogen (AIR).",
+  "PerC", "Percent carbon (%C) content of the tissue sample by dry mass.",
+  "PerN", "Percent nitrogen (%N) content of the tissue sample by dry mass.",
+  "CN_ratio", "Atomic carbon-to-nitrogen (C:N) ratio of the tissue sample, used as a proxy for lipid content.",
+  "Tissue_type", "Tissue sampled from the turtle: epidermis (EPI), whole blood (WB), or red blood cells (RBC)."
+)
+
+kable(
+  metadata_table,
+  caption = "Metadata descriptions for variables included in the stable isotope dataset of nesting leatherback sea turtles."
+)
+```
+Count the number of unique turtles and how many were sampled at least twice.
+
+```{r}
+# Blood: WB + RBC combined, ignore year
+blood_turtles <- sia %>%
+  filter(Tissue_type %in% c("WB", "RBC")) %>%
+  group_by(Turtle_ID) %>%
+  summarise(n_samples = n(), .groups = "drop") %>%
+  filter(n_samples >= 2) %>%
+  summarise(n_unique_turtles = n_distinct(Turtle_ID)) %>%
+  pull(n_unique_turtles)
+
+# Skin: EPI, ignore year
+skin_turtles <- sia %>%
+  filter(Tissue_type == "EPI") %>%
+  group_by(Turtle_ID) %>%
+  summarise(n_samples = n(), .groups = "drop") %>%
+  filter(n_samples >= 2) %>%
+  summarise(n_unique_turtles = n_distinct(Turtle_ID)) %>%
+  pull(n_unique_turtles)
+
+cat("Unique number of turtles sampled at least twice for blood:", blood_turtles, "\n")
+cat("Unique number of turtles sampled at least twice for epidermis:", skin_turtles, "\n")
+```
+Make a table showing how many samples there were per season for each tissue type and in brackets show how many repeats there were for each season.
+
+```{r}
+
+# Build summary: Unique turtles and repeats per Year × Tissue_type
+sample_summary_wide <- sia %>%
+  group_by(Year, Tissue_type) %>%
+  summarise(
+    Total_Samples  = n(),
+    Unique_Turtles = n_distinct(Turtle_ID),
+    Repeats        = Total_Samples - Unique_Turtles,
+    .groups = "drop"
+  ) %>%
+  mutate(Summary = paste0(Unique_Turtles, " (", Repeats, ")")) %>%  # show Unique (Repeats)
+  select(Year, Tissue_type, Summary) %>%
+  arrange(Year, Tissue_type) %>%
+  pivot_wider(names_from = Tissue_type, values_from = Summary)
+
+# Totals row across all years
+totals_row <- sia %>%
+  group_by(Tissue_type) %>%
+  summarise(
+    Total_Samples  = n(),
+    Unique_Turtles = n_distinct(Turtle_ID),
+    Repeats        = Total_Samples - Unique_Turtles,
+    .groups = "drop"
+  ) %>%
+  mutate(Summary = paste0(Unique_Turtles, " (", Repeats, ")")) %>%
+  select(Tissue_type, Summary) %>%
+  pivot_wider(names_from = Tissue_type, values_from = Summary) %>%
+  mutate(Year = "Total")
+
+# Bind totals, fix Year type, and order with Total last
+sample_summary_wide <- sample_summary_wide %>%
+  mutate(Year = as.character(Year)) %>%
+  bind_rows(totals_row) %>%
+  mutate(Year = factor(Year, levels = c(sort(unique(sample_summary_wide$Year)), "Total"))) %>%
+  arrange(Year)
+
+# Display table
+kable(sample_summary_wide,
+      caption = "Unique turtles per year and tissue (repeats in brackets).",
+      align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+
+```
+
+## 2: Examine isotopic difference in tissue type
+Calculate the average, standard deviation and number of samples for each tissue type
+
+**Overall statistics**
+```{r}
+overall_stats <- sia %>%
+  summarise(
+    d13C_mean = mean(d13C, na.rm = TRUE),
+    d13C_sd   = sd(d13C, na.rm = TRUE),
+    d13C_min  = min(d13C, na.rm = TRUE),
+    d13C_max  = max(d13C, na.rm = TRUE),
+    
+    d15N_mean = mean(d15N, na.rm = TRUE),
+    d15N_sd   = sd(d15N, na.rm = TRUE),
+    d15N_min  = min(d15N, na.rm = TRUE),
+    d15N_max  = max(d15N, na.rm = TRUE)
+  )
+
+overall_stats
+```
+
+```{r tissue_type_statistics}
+# Compute summary statistics for each Tissue_type
+tissue_summary <- sia %>%
+  group_by(Tissue_type) %>%
+  summarise(
+    n = n(),  # Sample size
+    d13C = paste0(round(mean(d13C, na.rm = TRUE), 3), " ± ", round(sd(d13C, na.rm = TRUE), 3)),
+    d15N = paste0(round(mean(d15N, na.rm = TRUE), 3), " ± ", round(sd(d15N, na.rm = TRUE), 3)),
+    C_N = paste0(round(mean(CN_ratio, na.rm = TRUE), 3), " ± ", round(sd(CN_ratio, na.rm = TRUE), 3))  # Corrected here
+  )
+
+# Display the summary as an interactive table
+DT::datatable(
+  tissue_summary,
+  options = list(pageLength = 10, order = list(list(1, 'asc'))),
+  caption = "Table 2: Sample count and mean carbon (𝛿13C) and nitrogen (𝛿15N) isotope values from nesting leatherback sea turtles (Dermochelys coriacea) in Juno and Jupiter Beaches, Florida, USA during the 2014–2022 nesting seasons. Three different tissue types were collected: epidermis, red blood cells, and whole blood."
+)
+```
+
+**Permanova for differences in tissue type**
+
+```{r}
+permanova_tissue <- adonis2(
+  cbind(sia$d13C, sia$d15N) ~ Tissue_type,
+  data = sia,
+  method = "euclidean",
+  permutations = 999
+)
+
+permanova_tissue
+```
+**Permanova for differences in epidermis by year**
+```{r}
+epi_data <- sia %>% filter(Tissue_type == "EPI") %>%
+  mutate(Year = factor(Year))
+
+permanova_epi_year <- adonis2(
+  cbind(epi_data$d13C, epi_data$d15N) ~ Year,
+  data = epi_data,
+  method = "euclidean",
+  permutations = 999
+)
+
+permanova_epi_year
+```
+**Permanova for differences in whole blood by year**
+```{r}
+wb_data <- sia %>% filter(Tissue_type == "WB") %>%
+  mutate(Year = factor(Year))
+
+permanova_wb_year <- adonis2(
+  cbind(wb_data$d13C, wb_data$d15N) ~ Year,
+  data = wb_data,
+  method = "euclidean",
+  permutations = 999
+)
+
+permanova_wb_year
+```
+
+Do ANOVAs for all the tissue types and isotopes to see which years are different from each other.
+```{r ANOVA looking at differences between years}
+# Make sure Year is treated as a factor for the ANOVA
+epi_data$Year <- as.factor(epi_data$Year)
+
+# Perform ANOVA for d13C epidermis
+anova_d13c_epi <- aov(d13C ~ Year, data = epi_data)
+
+# Print the summary of the ANOVA
+summary(anova_d13c_epi)
+
+
+##########################
+# Perform ANOVA for d15N
+anova_d15n_epi <- aov(d15N ~ Year, data = epi_data)
+
+# Print the summary of the ANOVA
+summary(anova_d15n_epi)
+
+
+#########################
+# Whole blood
+# Make sure Year is treated as a factor for the ANOVA
+wb_data$Year <- as.factor(wb_data$Year)
+
+# Perform ANOVA for d13C epidermis
+anova_d13c_wb <- aov(d13C ~ Year, data = wb_data)
+
+# Print the summary of the ANOVA
+summary(anova_d13c_wb)
+
+
+##########################
+# Perform ANOVA for d15N
+anova_d15n_wb <- aov(d15N ~ Year, data = wb_data)
+
+# Print the summary of the ANOVA
+summary(anova_d15n_wb)
+
+```
+
+### Figure 1
+
+```{r Figure 1}
+# 1) Prep: filter out RBC for the boxplot panel
+df_filtered <- sia %>% dplyr::filter(Tissue_type != "RBC")
+
+df_long <- df_filtered %>%
+  pivot_longer(cols = c(d13C, d15N), names_to = "Isotope", values_to = "Value") %>%
+  dplyr::mutate(
+    Year = factor(Year),
+    Tissue_type = factor(Tissue_type, levels = c("EPI", "WB")),
+    Isotope = factor(Isotope, levels = c("d13C", "d15N"))
+  )
+
+# Create an emmeans object and then generate the CLD
+#13C
+emm_object_Epi_13C <- emmeans(anova_d13c_epi, ~ Year) %>%
+  cld(alpha = 0.05, Letters = LETTERS) %>% cbind(TissueType="EPI") # Adjust alpha as needed
+emm_object_WB_13C <- emmeans(anova_d13c_wb, ~ Year) %>%
+  cld(alpha = 0.05, Letters = LETTERS) %>% cbind(TissueType="WB") # Adjust alpha as needed
+
+#15N
+emm_object_Epi_15N <- emmeans(anova_d15n_epi, ~ Year) %>%
+  cld(alpha = 0.05, Letters = LETTERS) %>% cbind(TissueType="EPI") # Adjust alpha as needed
+emm_object_WB_15N <- emmeans(anova_d15n_wb, ~ Year) %>%
+  cld(alpha = 0.05, Letters = LETTERS) %>% cbind(TissueType="WB") # Adjust alpha as needed
+
+p_d13C <- ggplot(dplyr::filter(df_long, Isotope == "d13C"),
+                 aes(x = Year, y = Value, color = Tissue_type, fill = Tissue_type, alpha = 0.5)) +
+  geom_boxplot(position = position_dodge2(width = 0.8, preserve = "single", padding = 0.3),
+               width = 0.6, outlier.shape = 16, outlier.size = 1.8) +
+  labs(x = NULL, y = bquote(delta^13*C ~ ("\u2030"))) +   # remove x-axis label
+  scale_color_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue")) +
+  scale_fill_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue")) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "grey95", linewidth = 0.1),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_blank(),   # remove tick labels
+    axis.ticks.x = element_blank(),  # remove tick marks
+    legend.position = "none") +
+  ggplot2::annotate(geom = "text", x = 0.8, y = -13, label = "B)") +
+  geom_text(data=emm_object_Epi_13C, inherit.aes = F,
+            aes(Year, emmean+2.5, label=.group, color=TissueType), 
+            size=2.5, hjust=0.5, fontface="bold") +
+  geom_text(data=emm_object_WB_13C, inherit.aes = F,
+            aes(Year, emmean-2, label=.group, color=TissueType), 
+            size=2.5, hjust=0.5, fontface="bold")
+
+p_d15N <- ggplot(dplyr::filter(df_long, Isotope == "d15N"),
+                 aes(x = Year, y = Value, color = Tissue_type, fill = Tissue_type, alpha =0.5)) +
+  geom_boxplot(position = position_dodge2(width = 0.8, preserve = "single", padding = 0.3),
+               width = 0.6, outlier.shape = 16, outlier.size = 1.8) +
+   labs(x = "Year", y = bquote(delta^15*N ~ ("\u2030"))) +
+  scale_color_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue")) +
+  scale_fill_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue")) +
+  theme_minimal() +
+  theme(    
+    panel.grid.major = element_line(color = "grey95", linewidth = 0.1),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none") +
+  ggplot2::annotate(geom = "text", x = 0.8, y = 18.2, label = "C)") +
+  geom_text(data=emm_object_Epi_15N, inherit.aes = F,
+            aes(Year, emmean+4, label=.group, color=TissueType), 
+            size=2.5, hjust=0.5, fontface="bold") +
+  geom_text(data=emm_object_WB_15N, inherit.aes = F,
+            aes(Year, emmean-3.5, label=.group, color=TissueType), 
+            size=2.5, hjust=0.5, fontface="bold")
+
+# 3) SCATTER plot with custom colors
+sia$Tissue_type <- factor(sia$Tissue_type, levels = c("EPI", "WB", "RBC"))
+
+x_limits <- range(sia$d13C, na.rm = TRUE)
+y_limits <- range(sia$d15N, na.rm = TRUE)
+
+sia$alpha <- ifelse(sia$Tissue_type == "EPI", 0.3,
+                       ifelse(sia$Tissue_type == "WB", 0.5, 0.8))
+
+p_scatter <- ggplot(sia, aes(x = d13C, y = d15N, color = Tissue_type, fill = Tissue_type)) +
+  geom_point(aes(alpha = alpha), size = 2) +
+  scale_alpha_identity() +
+  labs(
+    x = bquote(delta^13*C ~ ("\u2030")),
+    y = bquote(delta^15*N ~ ("\u2030")),
+    color = "Tissue Type",
+    fill  = "Tissue Type"
+  ) +
+  scale_color_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue", "RBC" = "firebrick2"),
+                     labels = c("Epidermis", "Whole blood", "Red blood cells")) +
+  scale_fill_manual(values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue", "RBC" = "firebrick2"),
+                    labels = c("Epidermis", "Whole blood", "Red blood cells")) +
+  coord_cartesian(xlim = x_limits, ylim = y_limits) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text  = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 10, face = "bold"),
+    axis.line = element_line(colour = "grey80", linewidth = 0.5),
+    legend.position= "bottom",
+    legend.justification = c(0.2, 0),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10)) +
+    guides(color = guide_legend(override.aes = list(size = 3)),  # make points bigger
+           ) +
+ggplot2::annotate(geom = "text", x = -20.5, y = 18.2, label = "A)")
+
+
+# 4) Arrange side-by-side
+p_scatter + (p_d13C / p_d15N)
+
+```
+
+**Figure 1:** Stable isotope (𝛿¹³C and 𝛿¹⁵N) values from three tissue types (epidermis, whole blood, and red blood cells) collected from nesting leatherback sea turtles (Dermochelys coriacea) at Juno and Jupiter Beaches, Florida, USA. (A) Values of 𝛿¹³C and 𝛿¹⁵N by tissue type. (B) Yearly boxplots of 𝛿¹³C values. (C) Yearly boxplots of 𝛿¹⁵N values. For the boxplots, the horizontal line denotes the median, boxes span the interquartile range (25th–75th percentiles), whiskers extend to 1.5 × the interquartile range, and points beyond whiskers represent outliers. Different letters indicate significant pairwise differences (p < 0.05) for epidermis and whole blood respectively. Red blood cells were only collected in 2019 so were not included in the yearly boxplots.
+
+## 3: Perform cluster analyses for epidermis
+
+To ensure that each Turtle_ID is only used once per year, and that if multiple samples exist in the same year, the later date is discarded, and filtered accordingly before running clustering.
+
+```{r filter_unique_individuals}
+
+# Ensure Date is in Date format
+sia_date <- sia %>%
+  mutate(Date = suppressWarnings(as.Date(Date, tryFormats = c("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"))))
+
+# Remove second occurrences: Keep the earliest sample per Turtle_ID, Year, and Tissue_type
+filtered_data <- sia_date %>%
+  filter(Tissue_type == "EPI") %>%
+  group_by(Turtle_ID, Year, Tissue_type) %>%
+  slice_min(order_by = Date, with_ties = FALSE) %>%  # Keeps the earliest sample
+  ungroup() %>%
+  drop_na(d13C, d15N)                      # Keep only samples with both isotopes
+
+# Check before & after filtering
+cat("Rows before filtering:", nrow(sia_date), "\n")
+cat("Rows after filtering:", nrow(filtered_data), "\n")
+
+# View the combined dataset
+DT::datatable(
+  filtered_data,
+  options = list(pageLength = 10, order = list(list(1, 'asc')))
+)
+
+```
+
+To assess the clustering patterns of 𝛿¹³C and 𝛿¹⁵N values across different tissue types, a model-based clustering approach was implemented using the mclust package.
+
+### Figure 2
+
+
+```{r fig.width=11.5, fig.height=5, message=FALSE, warning=FALSE}
+# ---- PREP REFERENCE DATA ----
+reference_data <- data.frame(
+  Area = c("Canada", "South Atlantic Bight", "Massachusetts", "Gulf of Mexico"),
+  d15N = c(10.7, 11.7, 11.1, 10.9),
+  sd_d15N = c(1.1, 0.6, 1.3, 0.7),
+  d13C = c(-16.9, -17.9, -17.8, -15.6),
+  sd_d13C = c(0.9, 0.5, 0.7, 0.4),
+  Shape = c("Canada", "South Atlantic Bight", "Massachusetts", "Gulf of Mexico")
+)
+
+# ---- FILTER DATA (one record per turtle) ----
+epi_data <- filtered_data %>%
+  dplyr::filter(Tissue_type == "EPI") %>%
+  dplyr::arrange(Turtle_ID, Year, Date) %>%
+  dplyr::group_by(Turtle_ID) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  tidyr::drop_na(d13C, d15N)
+
+# ---- CLUSTERING ----
+mod_both <- mclust::Mclust(
+  epi_data %>% dplyr::select(d13C, d15N),
+  G = 2, modelNames = "VEI"
+)
+epi_data$Cluster_A <- factor(mod_both$classification)
+
+mod_carbon <- mclust::Mclust(
+  epi_data$d13C,
+  G = 3, modelNames = "E"
+)
+epi_data$Cluster_B <- factor(mod_carbon$classification)
+
+# ---- PLOTTING FUNCTION (NO LEGENDS IN PANELS) ----
+make_isotope_plot <- function(data, cluster_col, title_label) {
+  ggplot2::ggplot() +
+    # Clustered turtle data (colored, but legend suppressed)
+    ggplot2::geom_point(
+      data = data,
+      ggplot2::aes(x = d13C, y = d15N, color = .data[[cluster_col]]),
+      pch = 16, size = 3, alpha = 0.5
+    ) +
+    # Reference error bars (vertical: ymin/ymax)
+    ggplot2::geom_errorbar(
+      data = reference_data,
+      ggplot2::aes(
+        x = d13C,
+        ymin = d15N - sd_d15N,
+        ymax = d15N + sd_d15N
+      ),
+      width = 0.1, color = "grey50", alpha = 0.5
+    ) +
+    # Reference error bars (horizontal: xmin/xmax)
+    ggplot2::geom_errorbarh(
+      data = reference_data,
+      ggplot2::aes(
+        y = d15N,
+        xmin = d13C - sd_d13C,
+        xmax = d13C + sd_d13C
+      ),
+      height = 0.1, color = "grey50", alpha = 0.5
+    ) +
+    # Reference points (shapes)
+    ggplot2::geom_point(
+      data = reference_data,
+      ggplot2::aes(x = d13C, y = d15N, shape = Shape),
+      color = "black", size = 4
+    ) +
+    ggplot2::scale_color_brewer(palette = "Dark2") +
+    ggplot2::scale_shape_manual(values = c(17, 15, 18, 4)) +
+    ggplot2::labs(
+      x = expression(delta^13*C ~ ("\u2030")),
+      y = expression(delta^15*N ~ ("\u2030"))
+    ) +
+    ggplot2::annotate(
+      geom = "text", x = -19.5, y = 16.3,
+      label = title_label, fontface = "bold", size = 5
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      panel.grid.major = ggplot2::element_line(color = "grey95", linewidth = 0.1),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.border = ggplot2::element_rect(color = "black", fill = NA, linewidth = 1),
+      axis.text  = ggplot2::element_text(size = 12, color = "black"),
+      axis.title = ggplot2::element_text(size = 14, face = "bold"),
+      legend.position = "none"  # <- removes BOTH color and shape legends from panels
+    )
+}
+
+# ---- BUILD PANELS ----
+p1 <- make_isotope_plot(epi_data, "Cluster_A", "A)")
+p2 <- make_isotope_plot(epi_data, "Cluster_B", "B)") +
+  ggplot2::theme(axis.title.y = ggplot2::element_blank())
+
+# ---- MAKE A SINGLE SHAPE LEGEND (FORAGING AREAS ONLY) ----
+legend_plot <- ggplot2::ggplot(
+  reference_data,
+  ggplot2::aes(x = d13C, y = d15N, shape = Shape)
+) +
+  ggplot2::geom_point(size = 4, color = "black") +
+  ggplot2::scale_shape_manual(values = c(17, 15, 18, 4)) +
+  ggplot2::labs(shape = "Foraging Areas") +
+  ggplot2::theme_void() +
+  ggplot2::theme(
+    legend.position = "right",
+    legend.text = ggplot2::element_text(size = 10)
+  )
+
+legend_only <- cowplot::get_legend(legend_plot)
+
+# ---- ASSEMBLE FINAL FIGURE ----
+panels <- cowplot::plot_grid(p1, p2, nrow = 1, align = "hv")
+
+cowplot::plot_grid(
+  panels,
+  legend_only,
+  nrow = 1,
+  rel_widths = c(1, 0.18)
+)
+
+```
+
+**Figure 2:** Distribution of 𝛿¹³C and 𝛿¹⁵N stable isotope values from the epidermis of nesting leatherback sea turtles (Dermochelys coriacea) at Juno and Jupiter Beaches, Florida, USA. Individuals were grouped into four distinct clusters using Gaussian mixture models: (A) clustering based on both 𝛿¹³C and 𝛿¹⁵N values, and (B) clustering based solely on 𝛿¹³C values. The colors for each plot represent those respective clusters. We added, mean ± SD epidermis values from four known foraging areas based on, the data for thes came from previous studies in the region (Dodge et al. 2011; Wallace et al. 2014; Hsu 2020).
+
+## 4: Look at changes in isotopic values for the same individual within a nesting season
+
+First put the data into a wide format where each individual within a season has its data based on tissue type and then a first, second, third and so on for each isotope and Julian day value. Next calculate the change in isotope value between the first nesting event and the last for both carbon and nitrogen for each tissue type separately.
+
+```{r time_between_nesting}
+# Transform data into wide format for multiple nesting events
+wide_data <- sia %>%
+  arrange(Turtle_ID, Year, Tissue_type, Julian_Day) %>%
+  group_by(Turtle_ID, Year, Tissue_type) %>%
+  mutate(event = row_number()) %>%
+  pivot_wider(
+    names_from = event,
+    values_from = c(Date, Julian_Day, d13C, d15N, PerC, PerN, CN_ratio),
+    names_sep = "_"
+  ) %>%
+  ungroup()
+
+# Calculate nesting_time, change_d13C, and change_d15N with conditional checks
+wide_data <- wide_data %>%
+  mutate(
+    nesting_time = ifelse(!is.na(Julian_Day_2), Julian_Day_2 - Julian_Day_1, NA),
+    change_d13C = ifelse(!is.na(d13C_2), d13C_2 - d13C_1, NA),
+    change_d15N = ifelse(!is.na(d15N_2), d15N_2 - d15N_1, NA)
+  ) %>%
+  drop_na(change_d13C) #remove where there is no data
+```
+
+The data looks in the correct format and it has correctly been processed to show change in isotope values for individuals through the nesting season. Now I will plot the changes, only showing the time between nesting events greater than 10 days. Also remove the lowest change_d13C and highest change_d15N for whole blood because the AMP readings on the mass spec were out of the usual range.
+
+
+```{r nesting_time_isotope_data, warning = FALSE}
+# Filter for rows with nesting_time > 10, remove WB Turtle_ID 665, and select specific columns
+isotope_change <- wide_data %>%
+  dplyr::filter(nesting_time > 10) %>%
+  dplyr::filter(!(Tissue_type == "WB" & Turtle_ID == 665)) %>%
+  dplyr::select(Year, Turtle_ID, Tissue_type, nesting_time, change_d13C, change_d15N) %>%
+  mutate(
+    nesting_time = round(nesting_time, 3),
+    change_d13C = round(change_d13C, 3),
+    change_d15N = round(change_d15N, 3)
+  )
+
+# View the data that will be used for the graphs
+datatable(
+  isotope_change,
+  options = list(pageLength = 10, order = list(list(1, 'asc')),
+                 scrollx=TRUE),
+  caption = "Filtered Isotope Change Data (Rounded to 3 Decimal Places)"
+)
+```
+
+Now Look at the summary stats for mean, SD, and range
+
+```{r nesting_time_means_tissue, warning = FALSE}
+#Calculate all the means and SD for the tissue types and isotopes separately
+ mean_change <- isotope_change %>%
+ group_by(Tissue_type) %>%
+  summarise(
+    mean_d13C = mean(change_d13C, na.rm = TRUE),
+    sd_d13C   = sd(change_d13C, na.rm = TRUE),
+    max_d13C = max(change_d13C, na.rm = TRUE),
+    min_d13C = min(change_d13C, na.rm = TRUE),
+    mean_d15N = mean(change_d15N, na.rm = TRUE),
+    sd_d15N   = sd(change_d15N, na.rm = TRUE),
+    max_d15N = max(change_d15N, na.rm = TRUE),
+    min_d15N = min(change_d15N, na.rm = TRUE)
+  )
+
+# View the data 
+datatable(
+  mean_change %>% mutate(across(where(is.numeric), ~ round(., 3))),
+  options = list(
+    order = list(list(1, 'asc')), 
+    scrollX = TRUE,               # Note: 'scrollX' must be capitalized
+    pageLength = 10               # Optional: number of rows per page
+  ),
+  rownames = FALSE                # Optional: hides the index column for a cleaner look
+)
+
+```
+
+
+```{r nesting_time_stats, warning = FALSE}
+# Filter by tissue
+wb_change <- isotope_change %>% dplyr::filter(Tissue_type == "WB")
+epi_change <- isotope_change %>% dplyr::filter(Tissue_type == "EPI")
+
+# Fit models
+wb_d15N_model <- lm(change_d15N ~ nesting_time, data = wb_change)
+epi_d15N_model <- lm(change_d15N ~ nesting_time, data = epi_change)
+wb_d13C_model <- lm(change_d13C ~ nesting_time, data = wb_change)
+epi_d13C_model <- lm(change_d13C ~ nesting_time, data = epi_change)
+
+# Helper to extract and format values from a model
+extract_lm_values <- function(model) {
+  coefs <- summary(model)$coefficients[2, ]  # 2nd row = slope (not intercept)
+  list(
+    estimate = round(coefs[1], 3),
+    se = round(coefs[2], 3),
+    t = round(coefs[3], 2),
+    p = formatC(coefs[4], format = "f", digits = 3)
+  )
+}
+
+# Extract all
+wb_d15N_vals <- extract_lm_values(wb_d15N_model)
+epi_d15N_vals <- extract_lm_values(epi_d15N_model)
+wb_d13C_vals <- extract_lm_values(wb_d13C_model)
+epi_d13C_vals <- extract_lm_values(epi_d13C_model)
+
+
+```
+
+Checking for residuals
+```{r Check residuals, warning = FALSE}
+# Define custom AICc function
+AICc_manual <- function(model) {
+  k <- length(coef(model)) + 1  # number of parameters + 1 for sigma
+  n <- length(residuals(model))
+  aic <- AIC(model)
+  aicc <- aic + (2 * k * (k + 1)) / (n - k - 1)
+  return(round(aicc, 3))
+}
+
+# Filter by tissue
+wb_change <- isotope_change %>% dplyr::filter(Tissue_type == "WB")
+epi_change <- isotope_change %>% dplyr::filter(Tissue_type == "EPI")
+
+### ------------------- δ15N MODELS -------------------
+
+# OLS models for δ15N
+wb_d15N_lm <- lm(change_d15N ~ nesting_time, data = wb_change)
+epi_d15N_lm <- lm(change_d15N ~ nesting_time, data = epi_change)
+
+# GLS models for δ15N
+wb_d15N_gls <- gls(change_d15N ~ nesting_time, data = wb_change,
+                   weights = varExp(form = ~ nesting_time))
+epi_d15N_gls <- gls(change_d15N ~ nesting_time, data = epi_change,
+                    weights = varExp(form = ~ nesting_time))
+
+### ------------------- δ13C MODELS -------------------
+
+# OLS models for δ13C
+wb_d13C_lm <- lm(change_d13C ~ nesting_time, data = wb_change)
+epi_d13C_lm <- lm(change_d13C ~ nesting_time, data = epi_change)
+
+# GLS models for δ13C
+wb_d13C_gls <- gls(change_d13C ~ nesting_time, data = wb_change,
+                   weights = varExp(form = ~ nesting_time))
+epi_d13C_gls <- gls(change_d13C ~ nesting_time, data = epi_change,
+                    weights = varExp(form = ~ nesting_time))
+
+### ------------------- AICc OUTPUT -------------------
+
+cat("AICc Comparison:\n")
+
+# δ15N
+cat("WB δ15N - OLS:", AICc_manual(wb_d15N_lm), "\n")
+cat("WB δ15N - GLS:", AICc_manual(wb_d15N_gls), "\n")
+cat("EPI δ15N - OLS:", AICc_manual(epi_d15N_lm), "\n")
+cat("EPI δ15N - GLS:", AICc_manual(epi_d15N_gls), "\n\n")
+
+# δ13C
+cat("WB δ13C - OLS:", AICc_manual(wb_d13C_lm), "\n")
+cat("WB δ13C - GLS:", AICc_manual(wb_d13C_gls), "\n")
+cat("EPI δ13C - OLS:", AICc_manual(epi_d13C_lm), "\n")
+cat("EPI δ13C - GLS:", AICc_manual(epi_d13C_gls), "\n\n")
+
+### ------------------- RESIDUAL DIAGNOSTICS -------------------
+
+# Residual plots for quick visual check (OLS only)
+par(mfrow = c(2, 2))
+plot(wb_d15N_lm, main = "WB δ15N OLS")
+plot(epi_d15N_lm, main = "EPI δ15N OLS")
+plot(wb_d13C_lm, main = "WB δ13C OLS")
+plot(epi_d13C_lm, main = "EPI δ13C OLS")
+par(mfrow = c(1, 1))
+
+# Residual plots for quick visual check (GLS only)
+plot_gls_diagnostics <- function(gls_model, lm_formula, data, title_prefix = "") {
+  par(mfrow = c(2, 2))
+
+  # Residuals vs Fitted
+  plot(fitted(gls_model), resid(gls_model),
+       main = paste(title_prefix, "Residuals vs Fitted"),
+       xlab = "Fitted values", ylab = "Residuals")
+  abline(h = 0, lty = 2, col = "red")
+
+  # Q-Q plot
+  qqnorm(resid(gls_model), main = paste(title_prefix, "Q-Q Plot"))
+  qqline(resid(gls_model), col = "red")
+
+  # Scale-Location
+  plot(fitted(gls_model), sqrt(abs(resid(gls_model))),
+       main = paste(title_prefix, "Scale-Location"),
+       xlab = "Fitted values", ylab = "√|Residuals|")
+  abline(h = 0, lty = 2, col = "red")
+
+  # Residuals vs Leverage (approximated using lm)
+  lm_model <- lm(lm_formula, data = data)
+  leverage_vals <- hatvalues(lm_model)
+  plot(leverage_vals, resid(gls_model),
+       main = paste(title_prefix, "Residuals vs Leverage"),
+       xlab = "Leverage (from lm)", ylab = "GLS Residuals")
+  abline(h = 0, lty = 2, col = "red")
+
+  par(mfrow = c(1, 1))
+}
+
+# Plot for different types
+plot_gls_diagnostics(wb_d13C_gls, change_d13C ~ nesting_time, wb_change, "WB δ13C GLS")
+plot_gls_diagnostics(epi_d13C_gls, change_d13C ~ nesting_time, epi_change, "EPI δ13C GLS")
+plot_gls_diagnostics(wb_d15N_gls, change_d15N ~ nesting_time, wb_change, "WB δ15N GLS")
+plot_gls_diagnostics(epi_d15N_gls, change_d15N ~ nesting_time, epi_change, "EPI δ15N GLS")
+
+  
+
+### ------------------- MODEL SUMMARIES -------------------
+
+cat("Model Summaries:\n")
+
+cat("\nWB δ15N OLS Summary:\n")
+print(summary(wb_d15N_lm))
+
+cat("\nEPI δ15N OLS Summary:\n")
+print(summary(epi_d15N_lm))
+
+cat("\nWB δ13C OLS Summary:\n")
+print(summary(wb_d13C_lm))
+
+cat("\nEPI δ13C OLS Summary:\n")
+print(summary(epi_d13C_lm))
+
+cat("\nWB δ15N GLS Summary:\n")
+print(summary(wb_d15N_gls))
+
+cat("\nEPI δ15N GLS Summary:\n")
+print(summary(epi_d15N_gls))
+
+cat("\nWB δ13C GLS Summary:\n")
+print(summary(wb_d13C_gls))
+
+cat("\nEPI δ13C GLS Summary:\n")
+print(summary(epi_d13C_gls))
+
+
+```
+
+To assess temporal isotopic dynamics within individuals, we examined changes in δ¹³C and δ¹⁵N values across repeated nesting events. Across the nesting season, changes in isotope values were generally small, with limited evidence of consistent directional trends (Fig. 3). Changes in stable isotope values (Δδ¹³C and Δδ¹⁵N) across sampling intervals differed between tissue types. Epidermis showed no temporal trend in Δδ¹³C values (Estimate: `r epi_d13C_vals$estimate`, SE = `r epi_d13C_vals$se`, t = `r epi_d13C_vals$t`, p = `r epi_d13C_vals$p`) or Δδ¹⁵N values (Estimate: `r epi_d15N_vals$estimate`, SE = `r epi_d15N_vals$se`, t = `r epi_d15N_vals$t`, p = `r epi_d15N_vals$p`).
+
+Similarly, whole blood showed no significant change in Δδ¹³C values across the nesting season (Estimate: `r wb_d13C_vals$estimate`, SE = `r wb_d13C_vals$se`, t = `r wb_d13C_vals$t`, p = `r wb_d13C_vals$p`) or Δδ¹⁵N values (Estimate: `r wb_d15N_vals$estimate`, SE = `r wb_d15N_vals$se`, t = `r wb_d15N_vals$t`, p = `r wb_d15N_vals$p`). Although no consistent directional trend in either Δδ¹³C or Δδ¹⁵N was observed, residual variation differed markedly between tissues, with epidermis exhibiting substantially greater variability than whole blood (Fig. 3).
+
+### Figure 3
+
+```{r fig_3, fig.width=7, fig.height=6}
+#Dataframes for epi and wb only epi_change and wb_change
+wb_change <- isotope_change %>% dplyr::filter(Tissue_type == "WB")
+epi_change <- isotope_change %>% dplyr::filter(Tissue_type == "EPI")
+
+#Panel 1, epi carbon
+#Get p-value for graph
+gls_epi_13C <- gls(change_d13C ~ nesting_time, data = epi_change)
+p_val_epi_13C <- summary(gls_epi_13C)$tTable[2,"p-value"]
+
+epi_13C_change <- ggplot(epi_change, aes(nesting_time, change_d13C)) +
+  geom_point(aes(color = "EPI"), size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey40", alpha = 0.4) +
+  labs(
+    y = expression(Delta ~ delta^13*C),
+    color = "Tissue Type"
+  ) +
+scale_x_continuous(breaks = c(20, 40, 60))  +
+ylim(min(-3.5), max(5)) +  
+scale_color_manual(values = c("EPI" = "darkgoldenrod3"),
+                     labels = c("Epidermis")) +
+theme_minimal() +
+theme(
+    legend.position = "none",
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_blank(),    
+    axis.line.x.bottom = element_line(color = "black", linewidth = 1.2),
+    axis.line.y.left   = element_line(color = "black", linewidth = 1.2),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "mm")
+  ) +
+  ggplot2::annotate("text", x = 28, y = max(5), 
+           label = paste0("p = ", signif(p_val_epi_13C, 2))) + 
+  ggplot2::annotate(geom = "text", x = 14, y = max(5), label = "A)")
+
+#Panel 2, wb carbon
+#Get value
+gls_wb_13C <-  gls(change_d13C ~ nesting_time, data = wb_change)
+p_val_wb_13C <- summary(gls_wb_13C)$tTable[2, "p-value"]  
+
+
+wb_13C_change <- ggplot(wb_change, aes(nesting_time, change_d13C)) +
+  geom_point(aes(color = "WB"), size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey40", alpha = 0.4) +
+  labs(
+    y = expression(Delta ~ delta^13*C),
+    color = "Tissue Type"
+  ) +
+scale_x_continuous(breaks = c(20, 40, 60))  +
+ylim(min(-0.5), max(0.5)) +
+  scale_color_manual(values = c("WB" = "skyblue"),
+                     labels = c("Whole blood")) +
+theme_minimal() +
+theme(
+    legend.position = "none",
+    legend.title = element_blank(),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_blank(),    
+    axis.line.x.bottom = element_line(color = "black", linewidth = 1.2),
+    axis.line.y.left   = element_line(color = "black", linewidth = 1.2),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "mm")
+  ) +
+  ggplot2::annotate("text", x = 28, y = max(0.5),
+           label = paste0("p = ", signif(p_val_wb_13C, 2))) + 
+  ggplot2::annotate(geom = "text", x = 14, y = max(0.5), label = "B)")
+
+leg <- cowplot::get_legend(ggplot(df_long[1:4,]) + 
+  geom_point(aes(PerC, PerN, color=Tissue_type), alpha=0, size = 0) +
+  scale_color_manual(values = c(EPI = "goldenrod3", WB = "skyblue"),
+      labels = c(EPI = "Epidermis", WB = "Whole blood"),
+      breaks = c("EPI", "WB")  # ensures ordering
+    ) +
+  guides(color=guide_legend(override.aes = list(alpha=1, size=3))) +
+  theme(legend.key = element_rect(colour = "transparent", fill = "transparent"),
+        legend.background=element_blank(),
+        legend.direction="horizontal", 
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 14),
+    plot.margin = unit(c(0, 0, 0, 0), "mm")
+    ) +
+  labs(color="Tissue Type:")
+)
+
+#Panel 3, epi nitrogen
+##Get p-value for graph
+gls_epi_15N <- gls(change_d15N ~ nesting_time, data = epi_change)
+p_val_epi_15N <- summary(gls_epi_15N)$tTable[2,"p-value"]
+
+epi_15N_change <- 
+  ggplot(epi_change, aes(nesting_time, change_d15N)) +
+  geom_point(color = "goldenrod3", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey40", alpha = 0.4) +
+  labs(y = expression(Delta ~ delta^15*N),
+    color = "Tissue Type"
+  ) + 
+scale_y_continuous(breaks = c(4)) +
+ylim(min(-3.5), max(5)) +
+  theme_minimal() +
+theme(
+    axis.text.x = element_blank(),
+    axis.text.y  = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_blank(),
+    axis.line.x.bottom = element_line(color = "black", linewidth = 1.2),
+    axis.line.y.left   = element_line(color = "black", linewidth = 1.2),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "mm")
+  ) +
+  ggplot2::annotate("text", x = 28, y = max(5), 
+           label = paste0("p = ", signif(p_val_epi_15N, 2))) + 
+  ggplot2::annotate(geom = "text", x = 14, y = max(5), label = "C)")
+
+#Panel 4, wb nitrogen
+##Get p-value for graph
+gls_wb_15N <- gls(change_d15N ~ nesting_time, data = wb_change)
+p_val_wb_15N <- summary(gls_wb_15N)$tTable[2,"p-value"]
+
+wb_15N_change <- ggplot(wb_change, aes(nesting_time, change_d15N)) +
+  geom_point(color = "skyblue", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey40", alpha = 0.4) +
+  labs(
+    y = expression(Delta ~ delta^15*N),
+    color = "Tissue Type"
+  ) +
+scale_y_continuous(breaks = c(-0.2, 0.0, 0.2, 0.4)) +
+ylim(min(-0.5), max(0.5)) +
+  theme_minimal() +
+theme(
+    axis.text.x = element_blank(),
+    axis.text.y  = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    axis.title.x = element_blank(),    
+    axis.line.x.bottom = element_line(color = "black", linewidth = 1.2),
+    axis.line.y.left   = element_line(color = "black", linewidth = 1.2),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "mm")
+  ) +
+  ggplot2::annotate("text", x = 28, y = max(0.5), 
+           label = paste0("p = ", signif(p_val_wb_15N, 2))) + 
+  ggplot2::annotate(geom = "text", x = 14, y = max(0.5), label = "D)")
+
+
+#Make design of 4 plots with legend, the numbers represent the plot areas
+design <- "
+  111222
+  111222
+  111222
+  333444
+  333444
+  333444
+  #5555#
+"
+
+epi_13C_change + wb_13C_change + epi_15N_change + wb_15N_change + leg +
+  plot_layout(design = design, heights = c(1, 1, 1, 1, 1, 1, 1)) +
+  plot_annotation(
+    caption = "Days between sampling events",
+    theme = theme(
+      plot.caption = element_text(hjust = 0.5, vjust = 22, size = 15)
+    )
+  )
+```
+
+**Figure 3** Change in stable isotope values (represented as Δ13C and Δ15N, respectively) between the first and last sampling events for nesting leatherback sea turtles (Dermochelys coriacea) in Juno and Jupiter Beaches, Florida, USA. Isotopic change was calculated by subtracting values from the first encounter from those at the final encounter for each individual, shown separately for epidermis (EPI) and whole blood (WB).
+
+## 5: Compare the isotopic relationship between whole blood and epidermis
+
+Filter the data to only get data where there is more than one sample for the same turtle on the same date. 
+```{r Prepare data for regression}
+matched_samples <- sia %>%
+  dplyr::group_by(Turtle_ID, Date) %>%
+  dplyr::filter(n() > 1) %>%   # keeps all rows for those Turtle_ID-Date pairs with >1 sample
+  ungroup()
+```
+
+Compare regression models on matched_samples dataset using epidermis vs. whole blood isotopic values
+```{r RMA regression}
+# Filter and reshape for d13C comparisons
+d13C_pairs <- matched_samples %>%
+  dplyr::filter(Tissue_type %in% c("EPI", "WB")) %>%
+  dplyr::select(Turtle_ID, Date, Tissue_type, d13C) %>%
+  drop_na(d13C) %>%
+  dplyr::group_by(Turtle_ID, Date) %>%
+  dplyr::filter(n_distinct(Tissue_type) == 2) %>%
+  pivot_wider(names_from = Tissue_type, values_from = d13C)
+
+#Remove the highest 13C value as this had the lowest amps from the mass spec
+d13C_pairs <- d13C_pairs %>%
+  dplyr::filter(EPI != -13.06)
+
+
+# Filter and reshape for d15N comparisons
+d15N_pairs <- matched_samples %>%
+  dplyr::filter(Tissue_type %in% c("EPI", "WB")) %>%
+  dplyr::select(Turtle_ID, Date, Tissue_type, d15N) %>%
+  drop_na(d15N) %>%
+  dplyr::group_by(Turtle_ID, Date) %>%
+  dplyr::filter(n_distinct(Tissue_type) == 2) %>%
+  pivot_wider(names_from = Tissue_type, values_from = d15N) %>%
+  drop_na(EPI, WB)
+
+#Run the RMA model
+# δ13C
+rma_d13C <- lmodel2(EPI ~ WB, data = d13C_pairs, range.y =
+"interval", range.x = "interval", nperm = 999)
+rma_d13C
+##Extract the p-value
+rma_pval_d13C <- rma_d13C$regression.results[rma_d13C$regression.results$Method == "RMA", "P-perm (1-tailed)"]
+print(rma_pval_d13C)
+
+# δ15N
+rma_d15N <- lmodel2(EPI ~ WB, data = d15N_pairs, range.y =
+"interval", range.x = "interval", nperm = 99)
+rma_d15N
+##Extract the p-value
+rma_pval_d15N <- rma_d15N$regression.results[rma_d15N$regression.results$Method == "RMA", "P-perm (1-tailed)"]
+print(rma_pval_d15N)
+```
+
+The graphs for the different regression models for both carbon-13 and nitrogen-15
+```{r Graphs for regression}
+# Base plot (points + centered data + no confidence intervals)
+plot(rma_d13C,
+     xlab = "Whole Blood δ13C",
+     ylab = "Epidermis δ13C",
+     main = "Comparison of Regression Types: δ13C",
+     centr = TRUE,
+     confid = FALSE)
+
+# Add all regression lines
+lines(rma_d13C, "OLS", col = 1, lty = 1, lwd = 2)
+lines(rma_d13C, "MA", col = 2, lty = 2, lwd = 2)
+lines(rma_d13C, "SMA", col = 3, lty = 3, lwd = 2)
+lines(rma_d13C, "RMA", col = 4, lty = 4, lwd = 2)
+
+# Add legend
+legend("topleft",
+       legend = c("OLS", "MA", "SMA", "RMA"),
+       col = 1:4,
+       lty = 1:4,
+       lwd = 2,
+       bty = "n")
+
+# Base plot (points + centered data + no confidence intervals)
+plot(rma_d15N,
+     xlab = "Whole Blood δ15N",
+     ylab = "Epidermis δ15N",
+     main = "Comparison of Regression Types: δ15N",
+     centr = TRUE,
+     confid = FALSE)
+
+# Add all regression lines
+lines(rma_d15N, "OLS", col = 1, lty = 1, lwd = 2)
+lines(rma_d15N, "MA", col = 2, lty = 2, lwd = 2)
+lines(rma_d15N, "SMA", col = 3, lty = 3, lwd = 2)
+lines(rma_d15N, "RMA", col = 4, lty = 4, lwd = 2)
+
+# Add legend
+legend("topleft",
+       legend = c("OLS", "MA", "SMA", "RMA"),
+       col = 1:4,
+       lty = 1:4,
+       lwd = 2,
+       bty = "n")
+```
+
+**Table 3:** Results of Reduced Major Axis (RMA) regressions comparing 𝛿13C and 𝛿15N values between epidermis (EPI) and whole blood (WB) of nesting leatherback turtles (Dermochelys coriacea) in Juno and Jupiter Beaches, Florida, USA. Reported are regression equations, slope estimates with 95% confidence intervals, intercepts, coefficients of determination (R²), and p-values.
+
+```{r table3_rma_final, message=FALSE, warning=FALSE}
+# RMA rows
+rma_row_d13C <- rma_d13C$regression.results[rma_d13C$regression.results$Method == "RMA", , drop = FALSE]
+rma_row_d15N <- rma_d15N$regression.results[rma_d15N$regression.results$Method == "RMA", , drop = FALSE]
+
+# Compute R2 from paired data
+r2_d13C <- stats::cor(d13C_pairs$WB, d13C_pairs$EPI, use = "complete.obs")^2
+r2_d15N <- stats::cor(d15N_pairs$WB, d15N_pairs$EPI, use = "complete.obs")^2
+
+table3 <- dplyr::bind_rows(
+  data.frame(
+    Isotope = "δ¹³C",
+    Method = "RMA",
+    Intercept = rma_row_d13C$Intercept[1],
+    Slope = rma_row_d13C$Slope[1],
+    R2 = r2_d13C,
+    P_perm_1tailed = rma_row_d13C[["P-perm (1-tailed)"]][1],
+    N = nrow(d13C_pairs),
+    check.names = FALSE
+  ),
+  data.frame(
+    Isotope = "δ¹⁵N",
+    Method = "RMA",
+    Intercept = rma_row_d15N$Intercept[1],
+    Slope = rma_row_d15N$Slope[1],
+    R2 = r2_d15N,
+    P_perm_1tailed = rma_row_d15N[["P-perm (1-tailed)"]][1],
+    N = nrow(d15N_pairs),
+    check.names = FALSE
+  )
+) %>%
+  dplyr::mutate(
+    Intercept = round(Intercept, 3),
+    Slope = round(Slope, 3),
+    R2 = round(R2, 2),
+    P_perm_1tailed = signif(P_perm_1tailed, 3)
+  )
+
+kableExtra::kbl(
+  table3,
+  caption = "Table 3. Reduced major axis (RMA) regression results comparing epidermis (response) to whole blood (predictor) for matched samples. R² is calculated as cor(WB, EPI)² for matched pairs.",
+  booktabs = TRUE,
+  align = "l"
+) %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+To assess how isotopic values correspond between tissue types, we examined the relationship between epidermis and whole blood isotopic composition using reduced major axis (RMA) regression on matched samples. For δ¹³C values, the model explained approximately `r rma_row_d13C$R2` of the variance between tissues (r² = `r rma_row_d13C$R2`), and the slope was significantly different from zero (p = `r rma_row_d13C[["P-perm (1-tailed)"]]`). For δ¹⁵N values, the relationship between tissue types was stronger, with `r rma_row_d15N$R2` of the variation explained by the model (r² = `r rma_row_d15N$R2`), and the slope was significantly different from zero (p = `r rma_row_d15N[["P-perm (1-tailed)"]]`). Regression equations and statistics are summarized in Table 3.
+
+### Figure 4
+```{r, fig.width=8, fig.height=5}
+epi_wb_13C_graph <- ggplot(d13C_pairs, aes(x = WB, y = EPI)) +
+  geom_point() +
+  stat_ma_line(method = "RMA", 
+               range.x = "interval",
+               range.y = "interval") +
+  labs(x = bquote("Whole blood " * delta^13*C ~ ("\u2030")), y = bquote("Epidermis " * delta^13*C ~ ("\u2030"))) +
+  #scale_x_continuous(limits = c(-20.8, -18)) +
+  #scale_y_continuous(limits = c(-19.5, -14.5)) +
+  xlim(min(d13C_pairs$WB) - 0.25 , max(d13C_pairs$WB) + 0.25) +
+  ylim(min(d13C_pairs$EPI) - 0.25 , max(d13C_pairs$EPI) + 0.25) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line = element_line(color = "black", size = 1.2)
+  ) +
+  ggplot2::annotate("text", x = min(d13C_pairs$WB) + 0.25, 
+           y = max(d13C_pairs$EPI), 
+           label = paste0("A)  p = ", signif(rma_pval_d15N, 3))) 
+
+
+epi_wb_15N_graph <- ggplot(d15N_pairs, aes(x = WB, y = EPI)) +
+  geom_point() +
+  stat_ma_line(method = "RMA", 
+               range.x = "interval",
+               range.y = "interval") +
+  labs(x = bquote("Whole blood " * delta^15*N ~ ("\u2030")), y = bquote("Epidermis " * delta^15*N ~ ("\u2030"))) +
+  scale_y_continuous(breaks = 3) +
+  xlim(min(d15N_pairs$WB) - 0.5 , max(d15N_pairs$WB) + 0.3) +
+  ylim(min(d15N_pairs$EPI) - 0.5 , max(d15N_pairs$EPI) + 0.3) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 14),
+    strip.text = element_text(size = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    axis.line = element_line(color = "black", size = 1.2)
+  ) +
+  ggplot2::annotate("text", x = min(d15N_pairs$WB) + 0.5, 
+           y = max(d15N_pairs$EPI), 
+           label = paste0("B)  p = ", signif(rma_pval_d13C, 3)))
+
+epi_wb_13C_graph + epi_wb_15N_graph
+```
+
+**Figure 4:** Linear regressions between tissue types (epidermis and whole blood) and isotopic values (𝛿13C and 𝛿15N) for nesting leatherback sea turtles (Dermochelys coriacea) in Juno and Jupiter Beaches, Florida, USA.
+
+## 6: Comparison of C:N ratio and carbon 13
+
+Look at the variation in the C:N ratio of epidermis and whole blood
+```{r C:N}
+# Filter for only EPI and WB
+epi_wb_data <- sia %>%
+  dplyr::filter(Tissue_type %in% c("EPI", "WB"))
+
+#Use combined data removing the C:N ratio of 1.93
+epi_wb_data <- epi_wb_data %>%
+  dplyr::filter(CN_ratio != 1.93)
+
+#calcualte mean and sd
+mean_sd_cnratio <- epi_wb_data %>%
+  group_by(Tissue_type) %>%
+  summarise(
+    mean = mean(CN_ratio, na.rm = TRUE),
+    sd = sd(CN_ratio, na.rm = TRUE)
+  )
+
+# View the results
+print(mean_sd_cnratio)
+
+# Run Levene's test on C:N ratios
+leveneTest(CN_ratio ~ Tissue_type, data = epi_wb_data)
+
+```
+
+Regression of C:N ratio and C13 values for whole blood and epidermis
+```{r}
+#Run the RMA model
+rma_CN_ratio <- lmodel2(CN_ratio ~ d13C, data = epi_wb_data, range.y =
+"interval", range.x = "interval", nperm = 999)
+
+print(rma_CN_ratio)
+
+##Extract the p-value
+rma_pval_CN_ratio <- rma_CN_ratio$regression.results[rma_CN_ratio$regression.results$Method == "RMA", "P-perm (1-tailed)"]
+print(rma_pval_CN_ratio)
+
+##Do models by tissue type
+model_epi <- lmodel2(CN_ratio ~ d13C, data = subset(epi_wb_data, Tissue_type == "EPI"), range.y = "interval", range.x = "interval", nperm = 999)
+model_blood <- lmodel2(CN_ratio ~ d13C, data = subset(epi_wb_data, Tissue_type == "WB"), range.y = "interval", range.x = "interval", nperm = 999)
+
+rma_CN_ratio
+model_epi
+model_blood
+```
+
+
+```{r cn_models, include=FALSE}
+# Filter for only EPI and WB, and remove obvious outlier you specified
+epi_wb_data <- sia %>%
+  dplyr::filter(Tissue_type %in% c("EPI", "WB")) %>%
+  dplyr::filter(CN_ratio != 1.93)
+
+# Summary: mean, SD, n by tissue
+cn_summary <- epi_wb_data %>%
+  dplyr::group_by(Tissue_type) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_CN = mean(CN_ratio, na.rm = TRUE),
+    sd_CN = sd(CN_ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Levene's test (variance difference)
+lev_cn <- car::leveneTest(CN_ratio ~ Tissue_type, data = epi_wb_data)
+
+# RMA models
+rma_all   <- lmodel2::lmodel2(CN_ratio ~ d13C, data = epi_wb_data,
+                              range.y = "interval", range.x = "interval", nperm = 999)
+
+rma_epi   <- lmodel2::lmodel2(CN_ratio ~ d13C, data = subset(epi_wb_data, Tissue_type == "EPI"),
+                              range.y = "interval", range.x = "interval", nperm = 999)
+
+rma_wb    <- lmodel2::lmodel2(CN_ratio ~ d13C, data = subset(epi_wb_data, Tissue_type == "WB"),
+                              range.y = "interval", range.x = "interval", nperm = 999)
+
+# Helper: extract the RMA row
+get_rma <- function(mod) mod$regression.results[mod$regression.results$Method == "RMA", , drop = FALSE]
+
+rma_all_row <- get_rma(rma_all)
+rma_epi_row <- get_rma(rma_epi)
+rma_wb_row  <- get_rma(rma_wb)
+
+# P-values (1-tailed) from lmodel2 row
+p_all <- rma_all_row[["P-perm (1-tailed)"]][1]
+p_epi <- rma_epi_row[["P-perm (1-tailed)"]][1]
+p_wb  <- rma_wb_row[["P-perm (1-tailed)"]][1]
+
+# R2 is not provided by your lmodel2 output; compute as cor^2
+r2_all <- cor(epi_wb_data$d13C, epi_wb_data$CN_ratio, use = "complete.obs")^2
+r2_epi <- cor(subset(epi_wb_data, Tissue_type == "EPI")$d13C,
+              subset(epi_wb_data, Tissue_type == "EPI")$CN_ratio, use = "complete.obs")^2
+r2_wb  <- cor(subset(epi_wb_data, Tissue_type == "WB")$d13C,
+              subset(epi_wb_data, Tissue_type == "WB")$CN_ratio, use = "complete.obs")^2
+
+# Extract Levene’s stats
+lev_F  <- as.numeric(lev_cn[1, "F value"])
+lev_p  <- as.numeric(lev_cn[1, "Pr(>F)"])
+lev_df1 <- as.integer(lev_cn[1, "Df"])
+lev_df2 <- as.integer(lev_cn[2, "Df"])
+
+# A clean regression results table
+cn_rma_table <- dplyr::bind_rows(
+  data.frame(
+    Data = "All samples (EPI + WB)",
+    Intercept = rma_all_row$Intercept[1],
+    Slope = rma_all_row$Slope[1],
+    R2 = r2_all,
+    P_perm_1tailed = p_all,
+    N = nrow(epi_wb_data),
+    check.names = FALSE
+  ),
+  data.frame(
+    Data = "Epidermis only",
+    Intercept = rma_epi_row$Intercept[1],
+    Slope = rma_epi_row$Slope[1],
+    R2 = r2_epi,
+    P_perm_1tailed = p_epi,
+    N = nrow(subset(epi_wb_data, Tissue_type == "EPI")),
+    check.names = FALSE
+  ),
+  data.frame(
+    Data = "Whole blood only",
+    Intercept = rma_wb_row$Intercept[1],
+    Slope = rma_wb_row$Slope[1],
+    R2 = r2_wb,
+    P_perm_1tailed = p_wb,
+    N = nrow(subset(epi_wb_data, Tissue_type == "WB")),
+    check.names = FALSE
+  )
+)
+
+# Round for display (values remain numeric in objects above)
+cn_summary_disp <- cn_summary %>%
+  dplyr::mutate(
+    mean_CN = round(mean_CN, 2),
+    sd_CN = round(sd_CN, 2)
+  )
+
+cn_rma_table_disp <- cn_rma_table %>%
+  dplyr::mutate(
+    Intercept = round(Intercept, 3),
+    Slope = round(Slope, 3),
+    R2 = round(R2, 2),
+    P_perm_1tailed = signif(P_perm_1tailed, 3)
+  )
+
+# Helper for "p < 0.001" without extra functions
+p_text <- function(p) ifelse(is.na(p), NA, ifelse(p < 0.001, "< 0.001", as.character(signif(p, 3))))
+```
+
+```{r cn_tables, echo=FALSE}
+kableExtra::kbl(
+  cn_summary_disp,
+  caption = "Summary of C:N ratios by tissue type.",
+  booktabs = TRUE
+) %>%
+  kableExtra::kable_styling(full_width = FALSE)
+
+kableExtra::kbl(
+  cn_rma_table_disp,
+  caption = "RMA regression of C:N ratio against δ¹³C. R² computed as cor(δ¹³C, C:N)² for the corresponding dataset.",
+  booktabs = TRUE
+) %>%
+  kableExtra::kable_styling(full_width = FALSE)
+```
+
+Lipid content, as inferred from C:N ratios, was unlikely to bias interpretation of isotopic results. Epidermis exhibited significantly greater variability in C:N ratios than whole blood (Levene’s test: *F*`r lev_df1`,`r lev_df2` = `r signif(lev_F, 3)`, *p* `r ifelse(lev_p < 0.001, "< 0.001", paste0("= ", signif(lev_p, 3)))`). However, mean C:N ratios were lower in epidermis (`r cn_summary_disp$mean_CN[cn_summary_disp$Tissue_type=="EPI"]` ± `r cn_summary_disp$sd_CN[cn_summary_disp$Tissue_type=="EPI"]` SD) than in whole blood (`r cn_summary_disp$mean_CN[cn_summary_disp$Tissue_type=="WB"]` ± `r cn_summary_disp$sd_CN[cn_summary_disp$Tissue_type=="WB"]` SD), indicating that lipid levels in epidermis were not elevated overall despite higher variability (Fig. 5).
+
+To evaluate whether lipid-related variation covaried with carbon isotope values, we examined the relationship between δ¹³C and C:N ratio using reduced major axis (RMA) regression. When epidermis and whole blood samples were analyzed together, δ¹³C showed a significant negative relationship with C:N ratio (r² = `r cn_rma_table_disp$R2[cn_rma_table_disp$Data=="All samples (EPI + WB)"]`, *p* `r ifelse(p_all < 0.001, "< 0.001", paste0("= ", signif(p_all, 3)))`). However, tissue-specific models were weaker (epidermis: r² = `r cn_rma_table_disp$R2[cn_rma_table_disp$Data=="Epidermis only"]`, *p* `r ifelse(p_epi < 0.001, "< 0.001", paste0("= ", signif(p_epi, 3)))`; whole blood: r² = `r cn_rma_table_disp$R2[cn_rma_table_disp$Data=="Whole blood only"]`, *p* `r ifelse(p_wb < 0.001, "< 0.001", paste0("= ", signif(p_wb, 3)))`). Together, these results suggest that lipid effects may contribute to cross-tissue differences in δ¹³C but do not strongly drive within-tissue δ¹³C variability.
+
+
+### Figure 5
+Graph for the paper including the relationship between whole blood and epidermis and the variation in C:N ratios.
+
+```{r Figure 5, fig.width=4, fig.height=3}
+#Fig_5 <- 
+ggplot(epi_wb_data, aes(x = CN_ratio, y = d13C, color = Tissue_type)) +
+  geom_point(aes(color = Tissue_type), size = 1.5, alpha = 0.5) +
+  labs(
+    x = "C:N Ratio",
+    y = expression(delta^13*C ~ ("\u2030")),
+    color = "Tissue Type"
+  ) +
+  scale_color_manual(
+    values = c("EPI" = "darkgoldenrod3", "WB" = "skyblue"),
+    labels = c("Epidermis", "Whole blood")
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+    legend.position = "bottom",
+    legend.margin = margin(-0.25, 0, 0, 0, unit = "cm"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank()  # <- no comma here
+  ) 
+```
+
+**Figure 5:** Relationship between C:N ratio and 𝛿¹³C values in epidermis (EPI) and whole blood (WB) of nesting leatherback turtles (Dermochelys coriacea) at Juno and Jupiter Beaches, Florida, USA.
+
+
+
